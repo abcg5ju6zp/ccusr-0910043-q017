@@ -69,6 +69,10 @@ class ArrayExpression(_CollectionMixin, LiteralExpressionBase):  # type: ignore[
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super(ArrayExpression, self).__init__(*args, **kwargs)
         self.result_type = DataType.ARRAY(value_type=_iterable_member_value_type(self.value))
+        required: frozenset = frozenset()
+        for member in self.value:
+            required |= member.required_capabilities
+        self.required_capabilities = required
 
     @classmethod
     def build(cls, context: 'Context', value: Iterable[ExpressionBase]) -> 'ArrayExpression':  # type: ignore[override]
@@ -125,6 +129,10 @@ class MappingExpression(LiteralExpressionBase):
                 key_type=_iterable_member_value_type(key for key, _ in self.value),
                 value_type=_iterable_member_value_type(value for _, value in self.value)
         )
+        required: frozenset = frozenset()
+        for key, value in self.value:
+            required |= key.required_capabilities | value.required_capabilities
+        self.required_capabilities = required
 
     @classmethod
     def build(cls, context: 'Context', value: Any) -> 'MappingExpression':  # type: ignore[override]
@@ -164,6 +172,10 @@ class SetExpression(_CollectionMixin, LiteralExpressionBase):  # type: ignore[ov
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super(SetExpression, self).__init__(*args, **kwargs)
         self.result_type = DataType.SET(value_type=_iterable_member_value_type(self.value))
+        required: frozenset = frozenset()
+        for member in self.value:
+            required |= member.required_capabilities
+        self.required_capabilities = required
 
     @classmethod
     def build(cls, context: 'Context', value: Iterable[ExpressionBase]) -> 'SetExpression':  # type: ignore[override]

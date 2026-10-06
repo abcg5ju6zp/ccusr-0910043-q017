@@ -41,6 +41,7 @@ from .engine import Context
 from .engine import Rule
 
 from .errors import AttributeResolutionError
+from .errors import CapabilityError
 from .errors import EngineError
 from .errors import EvaluationError
 from .errors import RuleSyntaxError
@@ -50,6 +51,7 @@ from .types import DataType
 
 __all__ = (
     'AttributeResolutionError',
+    'CapabilityError',
     'Context',
     'DataType',
     'EngineError',

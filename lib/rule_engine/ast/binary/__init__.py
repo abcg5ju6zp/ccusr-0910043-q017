@@ -67,6 +67,7 @@ class CoalesceExpression(ExpressionBase):
             self.result_type = DataType.NULLABLE.wrap(base_type)
         else:
             self.result_type = base_type
+        self.required_capabilities = left.required_capabilities | right.required_capabilities
 
     @classmethod
     def build(cls, context: 'Context', left: ExpressionBase, right: ExpressionBase) -> ExpressionBase:  # type: ignore[override]
@@ -85,6 +86,8 @@ class CoalesceExpression(ExpressionBase):
         return left_value
 
     def reduce(self) -> ExpressionBase:
+        if self.required_capabilities:
+            return self
         if not _is_reduced(self.left, self.right):
             return self
         return LiteralExpressionBase.from_value(self.context, self.evaluate(None))

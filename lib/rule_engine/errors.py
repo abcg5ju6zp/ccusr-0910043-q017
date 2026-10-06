@@ -69,6 +69,18 @@ class MappingAttributeLookupDeprecation(DeprecationWarning):
 class EvaluationError(EngineError):
     """项目内部接口说明。"""
 
+class CapabilityError(EvaluationError):
+    """项目内部接口说明。"""
+    def __init__(self, capabilities: Any) -> None:
+        """项目内部接口说明。"""
+        self.capabilities = frozenset(capabilities)
+        """The capability categories that the caller is missing."""
+        label = 'capability' if len(self.capabilities) == 1 else 'capabilities'
+        # the message intentionally names only the missing capability categories; the protected symbol, attribute or
+        # function that triggered the denial is deliberately omitted so protected field names are not disclosed
+        message = 'missing required {0}: {1}'.format(label, ', '.join(repr(c) for c in sorted(self.capabilities)))
+        super(CapabilityError, self).__init__(message)
+
 class SyntaxError(EngineError):
     """项目内部接口说明。"""
 

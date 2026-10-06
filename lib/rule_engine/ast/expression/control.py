@@ -70,6 +70,10 @@ class ComprehensionExpression(ExpressionBase):
         self.iterable = iterable
         self.condition = condition
         self.result_type = DataType.ARRAY(self.result.result_type)
+        required = result.required_capabilities | iterable.required_capabilities
+        if condition is not None:
+            required |= condition.required_capabilities
+        self.required_capabilities = required
 
     @classmethod
     def build(  # type: ignore[override]
@@ -131,6 +135,9 @@ class TernaryExpression(ExpressionBase):
         self.condition = condition
         self.case_true = case_true
         self.case_false = case_false
+        self.required_capabilities = (
+                condition.required_capabilities | case_true.required_capabilities | case_false.required_capabilities
+        )
         true_type = DataType.NULLABLE.unwrap(self.case_true.result_type)
         false_type = DataType.NULLABLE.unwrap(self.case_false.result_type)
         if true_type == false_type:
@@ -190,6 +197,7 @@ class UnaryExpression(ExpressionBase):
             raise ValueError('unknown unary expression type')
         self._evaluator = getattr(self, '_op_' + type_)
         self.right = right
+        self.required_capabilities = right.required_capabilities
 
     @classmethod
     def build(cls, context: 'Context', type_: str, right: ExpressionBase) -> ExpressionBase:  # type: ignore[override]
@@ -220,6 +228,8 @@ class UnaryExpression(ExpressionBase):
 
     def reduce(self) -> ExpressionBase:
         type_ = self.type.lower()
+        if self.required_capabilities:
+            return self
         if not _is_reduced(self.right):
             return self
         if type_ == 'not':

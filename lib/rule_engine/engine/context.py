@@ -42,6 +42,7 @@ import warnings
 from typing import Any, Callable, Iterator, cast
 
 from .. import ast  # noqa: F401 — must be imported before builtins to avoid a circular import
+from .. import authz
 from .. import builtins
 from .. import errors
 from .. import types
@@ -127,16 +128,19 @@ def type_resolver_from_sqlalchemy(cls: type, *, strict: bool = True) -> Callable
 
 class _ThreadLocalStorage(object):
     """项目内部接口说明。"""
-    __slots__ = ('assignment_scopes', 'regex_groups')
+    __slots__ = ('assignment_scopes', 'regex_groups', 'grants')
     assignment_scopes: 'collections.deque[dict[str, ast.Assignment]]'
     regex_groups: tuple[str, ...] | None
+    grants: Callable[[], frozenset] | None
     def __init__(self) -> None:
         self.assignment_scopes = collections.deque()
         self.regex_groups = None
+        self.grants = None
 
     def reset(self) -> None:
         self.assignment_scopes.clear()
         self.regex_groups = None
+        self.grants = None
 
 class Context(object):
     """项目内部接口说明。"""
@@ -149,7 +153,9 @@ class Context(object):
                     default_timezone: str | datetime.tzinfo = 'local',
                     default_value: Any = errors.UNDEFINED,
                     decimal_context: decimal.Context | None = None,
-                    mapping_attribute_lookup: bool = True
+                    mapping_attribute_lookup: bool = True,
+                    resolver_capabilities: collections.abc.Mapping[str, Any] | Callable[[str], Any] | None = None,
+                    grants: Any = None
     ) -> None:
         """项目内部接口说明。"""
         self.regex_flags = regex_flags
@@ -187,6 +193,15 @@ class Context(object):
             type_resolver = type_resolver_from_dict(type_resolver)
         self.__type_resolver = type_resolver or _default_type_resolver
         self.__resolver = resolver or resolve_item
+        self.__resolver_capabilities = resolver_capabilities
+        """The *resolver_capabilities* parameter from :py:meth:`~__init__` (a name -> capabilities mapping or callable)."""
+        self.grants = grants
+        """
+        调用者默认被授予的能力集合，可为可迭代对象或返回可迭代对象的零参 callable。
+        The default caller capabilities used to authorize rules when :py:meth:`~rule_engine.engine.rule.Rule.evaluate`
+        is not given explicit *grants*. ``None`` is equivalent to an empty set: anything that declares required
+        capabilities is denied unless the caller is explicitly granted them.
+        """
         self.mapping_attribute_lookup = mapping_attribute_lookup
         """The *mapping_attribute_lookup* parameter from :py:meth:`~__init__`."""
         self._mapping_fallback_lock = threading.Lock()
@@ -200,9 +215,11 @@ class Context(object):
                 'default_value': self.default_value,
                 'decimal_context': self.decimal_context,
                 'mapping_attribute_lookup': self.mapping_attribute_lookup,
+                'grants': self.grants,
                 '_mapping_fallback_warned': self._mapping_fallback_warned,
                 '_Context__type_resolver': self.__type_resolver,
                 '_Context__resolver': self.__resolver,
+                '_Context__resolver_capabilities': self.__resolver_capabilities,
         }
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -212,9 +229,11 @@ class Context(object):
         self.default_value = state['default_value']
         self.decimal_context = state['decimal_context']
         self.mapping_attribute_lookup = state['mapping_attribute_lookup']
+        self.grants = state['grants']
         self._mapping_fallback_warned = state['_mapping_fallback_warned']
         self.__type_resolver = state['_Context__type_resolver']
         self.__resolver = state['_Context__resolver']
+        self.__resolver_capabilities = state['_Context__resolver_capabilities']
         # recreate transient objects that can not be pickled
         self._thread_local = threading.local()
         self._mapping_fallback_lock = threading.Lock()
@@ -246,19 +265,87 @@ class Context(object):
         if scope == builtins.Builtins.scope_name:
             thing = self.builtins
         if isinstance(thing, builtins.Builtins):
-            return resolve_item(thing, name)
+            self._check_capabilities(self.builtins.resolve_capabilities(name))
+            value = resolve_item(thing, name)
+            self._check_value_capabilities(value)
+            return value
         if scope is None:
             for assignments in self._tls.assignment_scopes:
                 if name in assignments:
                     return assignments[name].value
-            return self.__resolver(thing, name)
+            self._check_capabilities(self._resolver_capabilities_for(name))
+            value = self.__resolver(thing, name)
+            # a resolved value (e.g. a protected callable) may itself carry a capability declaration; check it so
+            # protected values can not leak into the rule's data flow (nested calls, higher-order functions)
+            self._check_value_capabilities(value)
+            return value
         raise errors.SymbolResolutionError(name, symbol_scope=scope, thing=thing)
 
     __resolve_attribute = _AttributeResolver()
     def resolve_attribute(self, thing: Any, object_: Any, name: str) -> Any:
         """项目内部接口说明。"""
-        return self.__resolve_attribute(thing, object_, name)
+        try:
+            object_type = DataType.from_value(object_)
+        except TypeError:
+            # the object can not be mapped to a supported type; the resolver below raises the proper error
+            object_type = None
+        if object_type is not None:
+            self._check_capabilities(self.__resolve_attribute.resolve_capabilities(object_type, name))
+        value = self.__resolve_attribute(thing, object_, name)
+        self._check_value_capabilities(value)
+        return value
     resolve_attribute_type = __resolve_attribute.resolve_type
+    resolve_attribute_capabilities = __resolve_attribute.resolve_capabilities
+
+    def _check_capabilities(self, required: frozenset) -> None:
+        """项目内部接口说明。"""
+        if not required:
+            return
+        provider = self._tls.grants
+        if provider is None:
+            provider = authz.grants_provider(self.grants)
+        missing = frozenset(required) - provider()
+        if missing:
+            raise errors.CapabilityError(missing)
+
+    def _check_value_capabilities(self, value: Any) -> None:
+        """项目内部接口说明。"""
+        capabilities = getattr(value, '__required_capabilities__', None)
+        if capabilities:
+            self._check_capabilities(authz.normalize_capabilities(capabilities))
+
+    def _resolver_capabilities_for(self, name: str) -> frozenset:
+        """项目内部接口说明。"""
+        capabilities: frozenset = frozenset()
+        declared = self.__resolver_capabilities
+        if declared is not None:
+            capabilities |= self._lookup_capability_declaration(declared, name)
+        # the resolver itself may also declare the capabilities it requires, e.g. a tenant-registered resolver
+        # carrying a ``required_capabilities`` mapping or callable
+        resolver_declaration = getattr(self.__resolver, 'required_capabilities', None)
+        if resolver_declaration is not None:
+            capabilities |= self._lookup_capability_declaration(resolver_declaration, name)
+        return capabilities
+
+    @staticmethod
+    def _lookup_capability_declaration(declaration: Any, name: str) -> frozenset:
+        if callable(declaration):
+            return authz.normalize_capabilities(declaration(name))
+        if isinstance(declaration, collections.abc.Mapping):
+            return authz.normalize_capabilities(declaration.get(name))
+        raise TypeError('capability declarations must be a mapping or callable, not ' + type(declaration).__name__)
+
+    def resolve_capabilities(self, name: str, scope: str | None = None) -> frozenset:
+        """项目内部接口说明。"""
+        if scope == builtins.Builtins.scope_name:
+            return self.builtins.resolve_capabilities(name)
+        if scope is None:
+            for assignments in self._tls.assignment_scopes:
+                if name in assignments:
+                    # comprehension variables are local to the rule and resolve no external capabilities
+                    return frozenset()
+            return self._resolver_capabilities_for(name)
+        return frozenset()
 
     def _warn_mapping_fallback(self, attribute_name: str) -> None:
         with self._mapping_fallback_lock:

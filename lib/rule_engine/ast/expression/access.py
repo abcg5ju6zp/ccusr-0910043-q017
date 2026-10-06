@@ -48,7 +48,7 @@ from ..base import (
         _is_reduced,
         _resolve_type,
 )
-from ..literal import BooleanExpression, NullExpression
+from ..literal import BooleanExpression, NullExpression, StringExpression
 
 if TYPE_CHECKING:
     from ...engine.context import Context
@@ -71,6 +71,7 @@ class ContainsExpression(ExpressionBase):
         self.context = context
         self.member = member
         self.container = container
+        self.required_capabilities = container.required_capabilities | member.required_capabilities
 
     @classmethod
     def build(cls, context: 'Context', container: ExpressionBase, member: ExpressionBase) -> ExpressionBase:  # type: ignore[override]
@@ -95,6 +96,8 @@ class ContainsExpression(ExpressionBase):
         return bool(member_value in container_value)
 
     def reduce(self) -> ExpressionBase:
+        if self.required_capabilities:
+            return self
         if not _is_reduced(self.container, self.member):
             return self
         return BooleanExpression(self.context, self.evaluate(None))
@@ -108,12 +111,13 @@ class ContainsExpression(ExpressionBase):
 
 class GetAttributeExpression(ExpressionBase):
     """项目内部接口说明。"""
-    __slots__ = ('name', 'object', 'safe', '_object_type')
+    __slots__ = ('name', 'object', 'safe', '_object_type', '_attribute_capabilities')
     def __init__(self, context: 'Context', object_: ExpressionBase, name: str, safe: bool = False) -> None:
         """项目内部接口说明。"""
         self.context = context
         self.object = object_
         self._object_type = None
+        self._attribute_capabilities: frozenset = frozenset()
         if not safe:
             _assert_not_nullable(self.object.result_type, role='attribute access target')
         object_type = DataType.NULLABLE.unwrap(self.object.result_type)
@@ -130,9 +134,13 @@ class GetAttributeExpression(ExpressionBase):
                     self._object_type = resolved_object_type
                     attribute_type = _resolve_type(resolved_object_type.attributes[name], context)
                     self.result_type = attribute_type
+                    # OBJECT attributes may declare required capabilities on the type definition; attribute access
+                    # through the schema accessor bypasses the Context resolver, so the declaration lives here
+                    self._attribute_capabilities = resolved_object_type.attribute_capabilities.get(name, frozenset())
                 else:
                     try:
                         self.result_type = context.resolve_attribute_type(object_type, name)
+                        self._attribute_capabilities = context.resolve_attribute_capabilities(object_type, name)
                     except errors.AttributeResolutionError as error:
                         # this is necessary because MAPPING objects can have their keys accessed as attributes
                         if not DataType.is_type(object_type, DataType.MAPPING):
@@ -148,6 +156,7 @@ class GetAttributeExpression(ExpressionBase):
                     self.result_type = DataType.NULLABLE.wrap(self.result_type)
         self.name = name
         self.safe = safe
+        self.required_capabilities = self.object.required_capabilities | self._attribute_capabilities
 
     @classmethod
     def build(cls, context: 'Context', object_: ExpressionBase, name: str, safe: bool = False) -> ExpressionBase:  # type: ignore[override]
@@ -169,6 +178,9 @@ class GetAttributeExpression(ExpressionBase):
                     "attribute access on a null value (use ?. to safely navigate a NULLABLE expression)"
             )
 
+        # re-validate this attribute's declared capabilities against the current caller on every access; grants may
+        # have been revoked since the evaluation started
+        self.context._check_capabilities(self._attribute_capabilities)
         if self._object_type is not None:
             try:
                 value = self._object_type.accessor(resolved_obj, self.name)
@@ -182,6 +194,7 @@ class GetAttributeExpression(ExpressionBase):
                             suggestion=suggest_symbol(self.name, self._object_type.attributes.keys())
                     ) from None
                 value = default_value
+            self.context._check_value_capabilities(value)
             return self._new_value(value, verify_type=False)
 
         attribute_error = None
@@ -212,6 +225,9 @@ class GetAttributeExpression(ExpressionBase):
         return self._new_value(value, verify_type=False)
 
     def reduce(self) -> ExpressionBase:
+        if self.required_capabilities:
+            # do not constant-fold protected attribute access; it must be authorized at evaluation time
+            return self
         if not _is_reduced(self.object):
             return self
         literal = LiteralExpressionBase.from_value(self.context, self.evaluate(None))
@@ -226,7 +242,7 @@ class GetAttributeExpression(ExpressionBase):
 
 class GetItemExpression(ExpressionBase):
     """项目内部接口说明。"""
-    __slots__ = ('container', 'item', 'safe')
+    __slots__ = ('container', 'item', 'safe', '_item_capabilities')
     def __init__(self, context: 'Context', container: ExpressionBase, item: ExpressionBase, safe: bool = False) -> None:
         """项目内部接口说明。"""
         self.context = context
@@ -264,6 +280,12 @@ class GetItemExpression(ExpressionBase):
             self.result_type = DataType.NULLABLE.wrap(self.result_type)
         self.item = item
         self.safe = safe
+        # a literal string key names a mapping field; the resolver's capability declarations apply to it just like
+        # they do for attribute access through the mapping fallback
+        self._item_capabilities: frozenset = frozenset()
+        if isinstance(item, StringExpression):
+            self._item_capabilities = context._resolver_capabilities_for(item.value)
+        self.required_capabilities = container.required_capabilities | item.required_capabilities | self._item_capabilities
 
     @classmethod
     def build(cls, context: 'Context', container: ExpressionBase, item: ExpressionBase, safe: bool = False) -> ExpressionBase:  # type: ignore[override]
@@ -289,6 +311,10 @@ class GetItemExpression(ExpressionBase):
         if isinstance(resolved_obj, (bytes, str, tuple)):
             _assert_is_integer_number(resolved_item)
             resolved_item = int(resolved_item)
+        if isinstance(resolved_obj, collections.abc.Mapping) and not isinstance(resolved_obj, _builtins.Builtins) and isinstance(resolved_item, str):
+            # item access on a mapping reads the named field; enforce the resolver's capability declarations so
+            # container['field'] can not bypass the checks applied to container.field
+            self.context._check_capabilities(self.context._resolver_capabilities_for(resolved_item))
         try:
             value = operator.getitem(resolved_obj, resolved_item)
         except (IndexError, KeyError):
@@ -298,6 +324,8 @@ class GetItemExpression(ExpressionBase):
         return self._new_value(value, verify_type=False)
 
     def reduce(self) -> ExpressionBase:
+        if self.required_capabilities:
+            return self
         if DataType.is_type(self.container.result_type, DataType.MAPPING):
             if self.safe and not DataType.is_compatible(self.item.result_type, self.container.result_type.key_type):
                 return NullExpression(self.context)
@@ -346,6 +374,7 @@ class GetSliceExpression(ExpressionBase):
         self.start = start or LiteralExpressionBase.from_value(context, 0)
         self.stop = stop or LiteralExpressionBase.from_value(context, None)
         self.safe = safe
+        self.required_capabilities = container.required_capabilities | self.start.required_capabilities | self.stop.required_capabilities
 
     @classmethod
     def build(  # type: ignore[override]
@@ -392,6 +421,8 @@ class GetSliceExpression(ExpressionBase):
         return coerce_value(value, verify_type=False)
 
     def reduce(self) -> ExpressionBase:
+        if self.required_capabilities:
+            return self
         if not _is_reduced(self.container, self.start, self.stop):
             return self
         return LiteralExpressionBase.from_value(self.context, self.evaluate(None))

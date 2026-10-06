@@ -32,6 +32,7 @@
 
 from typing import TYPE_CHECKING, Any, Iterable
 
+from ... import authz
 from ... import errors
 from ...types import DataType
 from ...types import _CollectionDataTypeDef, _DataTypeDef, _FunctionDataTypeDef, _MappingDataTypeDef
@@ -53,6 +54,9 @@ class SymbolExpression(ExpressionBase):
         if type_hint is not None:
             self.result_type = type_hint
         self.scope = scope
+        # statically declare the capabilities this symbol's resolver requires; the whole set is re-validated against
+        # the caller's grants at evaluation time so cached rules never reuse another caller's authorization
+        self.required_capabilities = context.resolve_capabilities(name, scope=scope)
 
     def __repr__(self) -> str:
         return "<{0} name={1!r} >".format(self.__class__.__name__, self.name)
@@ -125,6 +129,10 @@ class FunctionCallExpression(ExpressionBase):
             assert isinstance(function_type, _FunctionDataTypeDef)
             self.result_type = function_type.return_type
         self.arguments = argument_tuple
+        required = self.function.required_capabilities
+        for argument in argument_tuple:
+            required |= argument.required_capabilities
+        self.required_capabilities = required
 
     @classmethod
     def build(cls, context: 'Context', function: ExpressionBase, arguments: Iterable[ExpressionBase]) -> ExpressionBase:  # type: ignore[override]
@@ -140,6 +148,10 @@ class FunctionCallExpression(ExpressionBase):
         return reduced
 
     def reduce(self) -> ExpressionBase:
+        if self.required_capabilities:
+            # never constant-fold an expression that requires capabilities; folding would execute the protected
+            # operation at compile time without the caller's grants
+            return self
         if not _is_reduced(self.function, *self.arguments):
             return self
         return LiteralExpressionBase.from_value(self.context, self.evaluate(None))
@@ -148,6 +160,11 @@ class FunctionCallExpression(ExpressionBase):
         function = self.function.evaluate(thing)
         if not callable(function):
             raise errors.EvaluationError('data type mismatch (not a callable value)')
+        # a callable value itself may declare required capabilities (e.g. a protected function obtained through a
+        # nested call); verify them against the current caller before any argument is evaluated
+        function_capabilities = getattr(function, '__required_capabilities__', None)
+        if function_capabilities:
+            self.context._check_capabilities(authz.normalize_capabilities(function_capabilities))
         arguments = tuple(argument.evaluate(thing) for argument in self.arguments)
         function_name: str | None = '<unknown>'
         if self.function.result_type != DataType.UNDEFINED:
@@ -162,9 +179,14 @@ class FunctionCallExpression(ExpressionBase):
         except errors.FunctionCallError as error:
             error.function_name = function_name
             raise error
+        except errors.CapabilityError:
+            # authorization denials must propagate unmasked so the caller sees the missing capability categories
+            raise
         except Exception as error:
             raise errors.FunctionCallError('function call failed', error=error, function_name=function_name) from None
         result = self._new_value(result)
+        # a call result may itself be a protected value (e.g. a factory returning a protected callable)
+        self.context._check_value_capabilities(result)
         if not DataType.is_compatible(DataType.from_value(result), self.result_type):
             raise errors.FunctionCallError('function call failed (data type mismatch on returned value)', function_name=function_name)
         return result

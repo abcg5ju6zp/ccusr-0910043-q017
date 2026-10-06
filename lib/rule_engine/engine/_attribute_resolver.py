@@ -42,6 +42,7 @@ from typing import Any, Callable, Iterable, Sequence, Sized
 from .. import errors
 from .. import parser
 from .. import types
+from ..authz import normalize_capabilities
 from ..suggestions import suggest_symbol
 from ..types import _CollectionDataTypeDef, _DataTypeDef
 
@@ -70,15 +71,17 @@ def _value_with_result_type(name: str, object_type: _DataTypeDef) -> _DataTypeDe
     return types.DataType.FUNCTION(name, argument_types=(object_type,), return_type=types.DataType.BOOLEAN)
 
 class _AttributeResolverFunction(object):
-    __slots__ = ('function', 'type_resolver')
+    __slots__ = ('function', 'type_resolver', 'capabilities')
     def __init__(
             self,
             function: Callable[..., Any],
             *,
             result_type: _DataTypeDef,
-            type_resolver: Callable[[_DataTypeDef], _DataTypeDef] | Any
+            type_resolver: Callable[[_DataTypeDef], _DataTypeDef] | Any,
+            capabilities: Any = None
     ) -> None:
         self.function = function
+        self.capabilities = normalize_capabilities(capabilities)
         if result_type and result_type is not types.DataType.UNDEFINED:
             if not types.DataType.is_definition(result_type):
                 raise TypeError('result_type must be a types.DataType definition')
@@ -98,23 +101,30 @@ class _AttributeResolverFunction(object):
 
 class _AttributeResolver(object):
     class attribute(object):
-        __slots__ = ('types', 'name', 'result_type', 'type_resolver')
+        __slots__ = ('types', 'name', 'result_type', 'type_resolver', 'capabilities')
         type_map: dict[_DataTypeDef, dict[str, _AttributeResolverFunction]] = collections.defaultdict(dict)
         def __init__(
                 self,
                 name: str,
                 *data_types: _DataTypeDef,
                 result_type: _DataTypeDef = types.DataType.UNDEFINED,
-                type_resolver: Callable[[_DataTypeDef], _DataTypeDef] | Any = errors.UNDEFINED
+                type_resolver: Callable[[_DataTypeDef], _DataTypeDef] | Any = errors.UNDEFINED,
+                capabilities: Any = None
         ) -> None:
             self.types = data_types
             self.name = name
             self.result_type = result_type
             self.type_resolver = type_resolver
+            self.capabilities = capabilities
 
         def __call__(self, function: Callable[..., Any]) -> Callable[..., Any]:
             for type_ in self.types:
-                self.type_map[type_][self.name] = _AttributeResolverFunction(function, result_type=self.result_type, type_resolver=self.type_resolver)
+                self.type_map[type_][self.name] = _AttributeResolverFunction(
+                        function,
+                        result_type=self.result_type,
+                        type_resolver=self.type_resolver,
+                        capabilities=self.capabilities
+                )
             return function
 
     def __call__(self, thing: Any, object_: Any, name: str) -> Any:
@@ -146,6 +156,15 @@ class _AttributeResolver(object):
     def resolve_type(self, object_type: _DataTypeDef, name: str) -> _DataTypeDef:
         """项目内部接口说明。"""
         return self._get_resolver(object_type, name).resolve_type(object_type)
+
+    def resolve_capabilities(self, object_type: _DataTypeDef, name: str) -> frozenset:
+        """项目内部接口说明。"""
+        try:
+            resolver = self._get_resolver(object_type, name)
+        except errors.AttributeResolutionError:
+            # unknown attributes declare no capabilities; the resolution error itself is raised by the normal path
+            return frozenset()
+        return resolver.capabilities
 
     @attribute('decode', types.DataType.BYTES, result_type=types.DataType.FUNCTION('decode', return_type=types.DataType.STRING, argument_types=(types.DataType.STRING,)))
     def bytes_decode(self, value: bytes) -> Callable[..., str]:

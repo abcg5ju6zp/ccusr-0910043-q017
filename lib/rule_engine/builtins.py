@@ -41,6 +41,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from . import errors
 from . import types
+from .authz import normalize_capabilities
 from .parser.utilities import parse_datetime, parse_float, parse_timedelta
 
 import dateutil.tz
@@ -111,17 +112,23 @@ class Builtins(collections.abc.Mapping):
             values: Mapping[str, Any],
             namespace: str | None = None,
             timezone: datetime.tzinfo | None = None,
-            value_types: Mapping[str, 'types._DataTypeDef'] | None = None
+            value_types: Mapping[str, 'types._DataTypeDef'] | None = None,
+            capabilities: Mapping[str, 'str | Iterable[str]'] | None = None
     ) -> None:
         """项目内部接口说明。"""
         self.__values = values
         self.__value_types = value_types or {}
+        self.__capabilities = {name: normalize_capabilities(caps) for name, caps in (capabilities or {}).items()}
         self.namespace = namespace
         self.timezone = timezone or dateutil.tz.tzlocal()
 
     def resolve_type(self, name: str) -> 'types._DataTypeDef':
         """项目内部接口说明。"""
         return self.__value_types.get(name, types.DataType.UNDEFINED)
+
+    def resolve_capabilities(self, name: str) -> frozenset:
+        """项目内部接口说明。"""
+        return self.__capabilities.get(name, frozenset())
 
     def __repr__(self) -> str:
         return "<{} namespace={!r} keys={!r} timezone={!r} >".format(self.__class__.__name__, self.namespace, tuple(self.keys()), self.timezone)

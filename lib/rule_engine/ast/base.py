@@ -205,6 +205,8 @@ class ExpressionBase(ASTNodeBase):
     context: 'Context'
     result_type: _DataTypeDef = DataType.UNDEFINED
     """成功求值结果的数据类型。"""
+    required_capabilities: frozenset = frozenset()
+    """表达式求值所需的调用者能力集合（编译期沿依赖链静态聚合）。"""
     def __repr__(self) -> str:
         return "<{0} >".format(self.__class__.__name__)
 
@@ -268,6 +270,11 @@ class Statement(ASTNodeBase):
         self.context = context
         self.expression = expression
         self.comment = comment
+
+    @property
+    def required_capabilities(self) -> frozenset:
+        """项目内部接口说明。"""
+        return self.expression.required_capabilities
 
     @classmethod
     def build(cls, context: 'Context', expression: ExpressionBase, **kwargs: Any) -> 'Statement':  # type: ignore[override]

@@ -63,6 +63,7 @@ class BinaryExpressionBase(ExpressionBase):
         self.left = left
         self._assert_type_is_compatible(right)
         self.right = right
+        self.required_capabilities = left.required_capabilities | right.required_capabilities
 
     @classmethod
     def build(cls, context: 'Context', type_: str, left: ExpressionBase, right: ExpressionBase) -> ExpressionBase:  # type: ignore[override]
@@ -88,6 +89,8 @@ class BinaryExpressionBase(ExpressionBase):
         return self._evaluator(thing)
 
     def reduce(self) -> ExpressionBase:
+        if self.required_capabilities:
+            return self
         if not _is_reduced(self.left, self.right):
             return self
         return LiteralExpressionBase.from_value(self.context, self.evaluate(None))

@@ -33,6 +33,7 @@
 import decimal
 from typing import Any, Iterable, Iterator, TYPE_CHECKING
 
+from .. import authz
 from .. import errors
 from ..parser import Parser
 from .context import Context
@@ -47,12 +48,26 @@ class Rule(object):
     The :py:class:`~rule_engine.parser.Parser` instance that will be used for parsing the rule text into a compatible
     用于规则求值的抽象语法树（AST）。
     """
-    def __init__(self, text: str, context: Context | None = None) -> None:
+    def __init__(self, text: str, context: Context | None = None, *, grants: Any = None) -> None:
         """项目内部接口说明。"""
         context = context or Context()
         self.text = text
         self.context = context
         self.statement = self.parser.parse(text, context)
+        self.required_capabilities: frozenset = self.statement.required_capabilities
+        """
+        整条依赖链在编译期静态聚合出的所需能力集合。
+        The capabilities the rule's whole dependency chain declares, aggregated at compile time. This is static
+        metadata only — the authorization decision is never cached on the rule and is re-derived from the caller's
+        grants on every evaluation.
+        """
+        # compile-time authorization: validate the dependency chain against the compiler's grants when they are
+        # known (passed explicitly or configured on the context); evaluation always re-validates regardless
+        effective_grants = grants if grants is not None else context.grants
+        if effective_grants is not None:
+            missing = self.required_capabilities - authz.grants_provider(effective_grants)()
+            if missing:
+                raise errors.CapabilityError(missing)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'text': self.text, 'context': self.context}
@@ -61,6 +76,7 @@ class Rule(object):
         self.text = state['text']
         self.context = state['context']
         self.statement = self.parser.parse(self.text, self.context)
+        self.required_capabilities = self.statement.required_capabilities
 
     def __repr__(self) -> str:
         return "<{0} text={1!r} >".format(self.__class__.__name__, self.text)
@@ -68,9 +84,9 @@ class Rule(object):
     def __str__(self) -> str:
         return self.text
 
-    def filter(self, things: Iterable[Any]) -> Iterator[Any]:
+    def filter(self, things: Iterable[Any], *, grants: Any = None) -> Iterator[Any]:
         """项目内部接口说明。"""
-        yield from (thing for thing in things if self.matches(thing))
+        yield from (thing for thing in things if self.matches(thing, grants=grants))
 
     @classmethod
     def is_valid(cls, text: str, context: Context | None = None) -> bool:
@@ -81,15 +97,27 @@ class Rule(object):
             return False
         return True
 
-    def evaluate(self, thing: Any) -> Any:
+    def evaluate(self, thing: Any, *, grants: Any = None) -> Any:
         """项目内部接口说明。"""
-        self.context._tls.reset()
-        with decimal.localcontext(self.context.decimal_context):
-            return self.statement.evaluate(thing)
+        context = self.context
+        previous_grants = context._tls.grants
+        context._tls.reset()
+        provider = authz.grants_provider(grants if grants is not None else context.grants)
+        # execution-time authorization: re-validate the dependency chain against *this* caller's grants on every
+        # evaluation so a cached rule can never reuse another tenant's authorization result
+        missing = self.required_capabilities - provider()
+        if missing:
+            raise errors.CapabilityError(missing)
+        context._tls.grants = provider
+        try:
+            with decimal.localcontext(context.decimal_context):
+                return self.statement.evaluate(thing)
+        finally:
+            context._tls.grants = previous_grants
 
-    def matches(self, thing: Any) -> bool:
+    def matches(self, thing: Any, *, grants: Any = None) -> bool:
         """项目内部接口说明。"""
-        return bool(self.evaluate(thing))
+        return bool(self.evaluate(thing, grants=grants))
 
     def to_graphviz(self) -> 'graphviz.Digraph':
         """项目内部接口说明。"""
