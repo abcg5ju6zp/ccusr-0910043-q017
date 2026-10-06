@@ -34,6 +34,7 @@ import decimal
 from typing import Any, Iterable, Iterator, TYPE_CHECKING
 
 from .. import errors
+from ..ast import Statement
 from ..parser import Parser
 from .context import Context
 
@@ -52,7 +53,19 @@ class Rule(object):
         context = context or Context()
         self.text = text
         self.context = context
-        self.statement = self.parser.parse(text, context)
+        self.statement = self._compile(text, context)
+
+    @classmethod
+    def _compile(cls, text: str, context: Context) -> Statement:
+        # 已编译 AST 缓存在 Context 上（Context 按租户/主体隔离），但命中缓存
+        # 时仍重新执行编译期鉴权，因此缓存的规则绝不可能沿用另一租户或主体
+        # 的授权结果。
+        cached = context._rule_cache.get(text)
+        if cached is None:
+            cached = cls.parser.parse(text, context)
+            context._rule_cache[text] = cached
+        context.compile_time_enforce(cached)
+        return cached
 
     def __getstate__(self) -> dict[str, Any]:
         return {'text': self.text, 'context': self.context}
@@ -60,7 +73,7 @@ class Rule(object):
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.text = state['text']
         self.context = state['context']
-        self.statement = self.parser.parse(self.text, self.context)
+        self.statement = self._compile(self.text, self.context)
 
     def __repr__(self) -> str:
         return "<{0} text={1!r} >".format(self.__class__.__name__, self.text)

@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import collections.abc
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -245,3 +246,15 @@ class FunctionCallError(EvaluationError):
 
 class ArithmeticError(EvaluationError):
     """项目内部接口说明。"""
+
+class CapabilityDeniedError(EvaluationError):
+    """调用者缺少规则依赖链上所需能力时抛出。
+
+    错误消息只按稳定顺序列出缺失能力的**类别**（如 ``field``、
+    ``resolver``、``function``、``derived``），不包含受保护字段名、解析器
+    键名、函数名等任何可能泄露受保护数据存在性的信息。
+    """
+    def __init__(self, missing_categories: 'collections.abc.Iterable[str]') -> None:
+        self.missing_categories: tuple[str, ...] = tuple(dict.fromkeys(missing_categories))
+        message = 'access denied: missing required capability category: ' + ', '.join(self.missing_categories)
+        super(CapabilityDeniedError, self).__init__(message)

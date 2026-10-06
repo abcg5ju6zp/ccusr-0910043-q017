@@ -32,3 +32,19 @@
 
 from .context import resolve_attribute, resolve_item, type_resolver_from_dataclass, type_resolver_from_dict, type_resolver_from_sqlalchemy, Context
 from .rule import Rule, DebugRule
+from ..security import (
+        Authorizer,
+        AuthorizationContext,
+        SecurityRegistry,
+        StaticAuthorizer,
+        category_of,
+        derived_capability,
+        field_capability,
+        function_capability,
+        resolver_capability,
+        CATEGORY_ALL,
+        CATEGORY_DERIVED,
+        CATEGORY_FIELD,
+        CATEGORY_FUNCTION,
+        CATEGORY_RESOLVER,
+)

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from ... import builtins as _builtins
 from ... import errors
+from ... import security
 from ...suggestions import suggest_symbol
 from ...types import DataType, coerce_value
 from ...types import _DataTypeDef
@@ -122,10 +123,11 @@ class GetAttributeExpression(ExpressionBase):
                 resolved_object_type = _resolve_type(object_type, context)
                 if DataType.is_type(resolved_object_type, DataType.OBJECT):
                     if name not in resolved_object_type.attributes:
+                        visible_attributes = context.visible_attribute_names(resolved_object_type)
                         raise errors.ObjectAttributeError(
                                 name,
                                 resolved_object_type,
-                                suggestion=suggest_symbol(name, resolved_object_type.attributes.keys())
+                                suggestion=suggest_symbol(name, visible_attributes)
                         )
                     self._object_type = resolved_object_type
                     attribute_type = _resolve_type(resolved_object_type.attributes[name], context)
@@ -170,6 +172,10 @@ class GetAttributeExpression(ExpressionBase):
             )
 
         if self._object_type is not None:
+            # 执行期二次鉴权：即使规则在编译期通过，若调用者的字段能力在
+            # 编译后被撤回，下一次求值仍会在这里被拒绝（fail-closed）。
+            if self.name in self._object_type.protected_attributes:
+                self.context.enforce((security.field_capability(self._object_type.name, self.name),))
             try:
                 value = self._object_type.accessor(resolved_obj, self.name)
             except (AttributeError, KeyError):
@@ -179,7 +185,7 @@ class GetAttributeExpression(ExpressionBase):
                             self.name,
                             self._object_type,
                             thing=thing,
-                            suggestion=suggest_symbol(self.name, self._object_type.attributes.keys())
+                            suggestion=suggest_symbol(self.name, self.context.visible_attribute_names(self._object_type))
                     ) from None
                 value = default_value
             return self._new_value(value, verify_type=False)

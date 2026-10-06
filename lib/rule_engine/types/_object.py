@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping
-from typing import Any, Callable, ClassVar
+from typing import Any, Callable, ClassVar, Iterable
 
 from .definitions import (
         _CollectionDataTypeDef,
@@ -103,9 +103,10 @@ def _substitute_self_references(definition: _DataTypeDef, target: _ObjectDataTyp
 
 class _ObjectDataTypeDef(_DataTypeDef):
     """项目内部接口说明。"""
-    __slots__ = ('attributes', 'accessor')
+    __slots__ = ('attributes', 'accessor', 'protected_attributes')
     attributes: dict[str, _DataTypeDef]
     accessor: Callable[[Any, str], Any]
+    protected_attributes: frozenset[str]
     is_object: ClassVar[bool] = True
     # class attribute (not in __slots__) — set after class definition below; a sentinel used inside attribute
     # schemas to self-reference the enclosing OBJECT without repeating its name
@@ -115,12 +116,15 @@ class _ObjectDataTypeDef(_DataTypeDef):
             name: str,
             python_type: type = object,
             attributes: Mapping[str, _DataTypeDef] | None = None,
-            accessor: Callable[[Any, str], Any] | None = None
+            accessor: Callable[[Any, str], Any] | None = None,
+            protected_attributes: Iterable[str] | None = None
     ) -> None:
         super(_ObjectDataTypeDef, self).__init__(name, python_type)
         self.is_scalar = False
         self.attributes = dict(attributes) if attributes else {}
         self.accessor = accessor if accessor is not None else getattr
+        # 仅管理员（或持有对应 field: 能力的调用者）可读的字段；编译期与执行期据此鉴权
+        self.protected_attributes = frozenset(protected_attributes or ())
         # resolve self-references in the attribute schema now that self exists; cross-name references are left intact
         # and will be resolved lazily at rule parse time via Context.resolve_type
         for attr_name, attr_type in self.attributes.items():
@@ -132,14 +136,16 @@ class _ObjectDataTypeDef(_DataTypeDef):
             self,
             name: str,
             attributes: Mapping[str, _DataTypeDef] | None = None,
-            accessor: Callable[[Any, str], Any] | None = None
+            accessor: Callable[[Any, str], Any] | None = None,
+            protected_attributes: Iterable[str] | None = None
     ) -> _ObjectDataTypeDef:
         """项目内部接口说明。"""
         return self.__class__(
                 name,
                 self.python_type,
                 attributes=attributes,
-                accessor=accessor
+                accessor=accessor,
+                protected_attributes=protected_attributes
         )
 
     @staticmethod

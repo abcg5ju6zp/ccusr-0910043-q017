@@ -35,7 +35,7 @@ from __future__ import annotations
 import collections
 import collections.abc
 import warnings
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 from .. import errors
 
@@ -74,6 +74,27 @@ class _DataTypeDef(object):
     @property
     def is_compound(self) -> bool:
         return not self.is_scalar
+
+    def __getstate__(self) -> dict[str, Any]:
+        # iterable_type 在容器子类上是只读派生 property（覆盖了基类槽位），
+        # 不能写入状态；FUNCTION 的 python_type 是无法 pickle 的 <class 'function'>
+        excluded = {'iterable_type'}
+        if isinstance(self, _FunctionDataTypeDef):
+            excluded.add('python_type')
+        state = {}
+        for cls in type(self).__mro__:
+            for slot in getattr(cls, '__slots__', ()):
+                if slot in excluded:
+                    continue
+                if hasattr(self, slot):
+                    state[slot] = getattr(self, slot)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        if isinstance(self, _FunctionDataTypeDef):
+            self.python_type = _PYTHON_FUNCTION_TYPE
+        for slot, value in state.items():
+            setattr(self, slot, value)
 
 class _UndefinedDataTypeDef(_DataTypeDef):
     def __repr__(self) -> str:
